@@ -1,0 +1,4 @@
+node_modules/
+.env
+rcm-synergy/.rcm-cache/
+*.run.log

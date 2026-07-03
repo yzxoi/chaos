@@ -1,0 +1,16 @@
+{
+  "name": "feishu-rcm-issue-bot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "listen": "bun run bot.ts listen",
+    "once": "bun run bot.ts once"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "1.58.0"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.13",
+    "@types/node": "22.13.9"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "session_id": "manual_test",
+  "reporter": "manual-test",
+  "message": "测试消息",
+  "source": "manual-test",
+  "target_repo": "owner/repo",
+  "repo_path": "./repo"
+}
