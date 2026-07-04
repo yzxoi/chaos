@@ -9,5 +9,5 @@
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true
   },
-  "include": ["bot.ts"]
+  "include": ["bot.ts", "lib/**/*.ts"]
 }
