@@ -2,3 +2,13 @@ node_modules/
 .env
 rcm-synergy/.rcm-cache/
 *.run.log
+
+# Archive: real chat/import content is ignored by default (keeps .gitkeep / README files)
+archive/**
+!archive/**/
+!archive/README.md
+!archive/imports/README.md
+!archive/**/.gitkeep
+
+# Mempalace palace data (optional)
+.mempalace/

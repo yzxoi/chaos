@@ -1,8 +1,30 @@
 templates_dir = "templates"
 cache_dir = ".rcm-cache"
 
+# Main: product assistant with memory support
 [[route]]
-event = "issue_triage"
+event = "assistant"
 action = "feishu_message"
-template = "issue_triage.rcm.tpl"
-fields = { SESSION_ID = "session_id", REPORTER = "reporter", MESSAGE = "message", TARGET_REPO = "target_repo", REPO_PATH = "repo_path", SOURCE = "source" }
+template = "assistant.rcm.tpl"
+fields = { SESSION_ID = "session_id", REPORTER = "reporter", MESSAGE = "message", TARGET_REPO = "target_repo", REPO_PATH = "repo_path", SOURCE = "source", MEMORY_DIR = "memory_dir", ARCHIVE_DIR = "archive_dir", RECENT_CONTEXT_PATH = "recent_context_path", CHAT_ID = "chat_id", MESSAGE_ID = "message_id" }
+
+# Memory ingest: write knowledge entries
+[[route]]
+event = "memory_ingest"
+action = "feishu_exchange"
+template = "memory_ingest.rcm.tpl"
+fields = { SESSION_ID = "session_id", REPORTER = "reporter", MESSAGE = "message", REPLY = "reply", ACTION = "action", SOURCE = "source", MEMORY_DIR = "memory_dir" }
+
+# Memory consolidate: rebuild and deduplicate knowledge
+[[route]]
+event = "memory_consolidate"
+action = "manual"
+template = "memory_consolidate.rcm.tpl"
+fields = { SESSION_ID = "session_id", MEMORY_DIR = "memory_dir", TARGET_REPO = "target_repo" }
+
+# Legacy backup (retained for migration reference)
+# [[route]]
+# event = "issue_triage"
+# action = "feishu_message"
+# template = "issue_triage.rcm.tpl"
+# fields = { SESSION_ID = "session_id", REPORTER = "reporter", MESSAGE = "message", TARGET_REPO = "target_repo", REPO_PATH = "repo_path", SOURCE = "source" }

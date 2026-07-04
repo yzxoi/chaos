@@ -4,7 +4,9 @@
   "type": "module",
   "scripts": {
     "listen": "bun run bot.ts listen",
-    "once": "bun run bot.ts once"
+    "once": "bun run bot.ts once",
+    "import": "bun run bot.ts import",
+    "consolidate": "bun run bot.ts consolidate"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "1.58.0"
