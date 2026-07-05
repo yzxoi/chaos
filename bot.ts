@@ -142,14 +142,14 @@ function sanitizeMessage(msg: string): string {
 }
 
 // ── RCM dispatch wrappers ────────────────────────────────────────
-function runAssistant(input: {
+async function runAssistant(input: {
   sessionId: string
   reporter: string
   message: string
   source: string
   chatId: string
   messageId: string
-}): { reply: string } {
+}): Promise<{ reply: string }> {
   const safeMessage = sanitizeMessage(input.message)
   const slugChatId = safeSlug(input.chatId)
   const recentContextPath = ensureRecentContext(slugChatId)
@@ -169,12 +169,12 @@ function runAssistant(input: {
     message_id: safeSlug(input.messageId, 64),
   }
 
-  const result = runRcmDispatch("assistant", fields)
+  const result = await runRcmDispatch("assistant", fields)
 
   return { reply: result.reply }
 }
 
-function runMemoryIngest(input: {
+async function runMemoryIngest(input: {
   sessionId: string
   reporter: string
   message: string
@@ -182,35 +182,31 @@ function runMemoryIngest(input: {
   action: string
   source: string
 }): Promise<void> {
-  return new Promise((resolve) => {
-    try {
-      const fields: Record<string, string> = {
-        session_id: input.sessionId,
-        reporter: input.reporter,
-        message: sanitizeMessage(input.message),
-        reply: input.reply,
-        action: input.action,
-        source: input.source,
-        memory_dir: memoryDir,
-      }
-
-      runRcmDispatch("memory_ingest", fields, { cwd: memoryDir })
-      resolve()
-    } catch (err) {
-      console.warn(`[ingest] failed:`, String(err))
-      resolve() // never reject — non-blocking
+  try {
+    const fields: Record<string, string> = {
+      session_id: input.sessionId,
+      reporter: input.reporter,
+      message: sanitizeMessage(input.message),
+      reply: input.reply,
+      action: input.action,
+      source: input.source,
+      memory_dir: memoryDir,
     }
-  })
+
+    await runRcmDispatch("memory_ingest", fields, { cwd: memoryDir })
+  } catch (err) {
+    console.warn(`[ingest] failed:`, String(err))
+  }
 }
 
-function runMemoryConsolidate(): string {
+async function runMemoryConsolidate(): Promise<string> {
   const fields: Record<string, string> = {
     session_id: `consolidate_${Date.now()}`,
     memory_dir: memoryDir,
     target_repo: botConfig.targetRepo,
   }
 
-  const result = runRcmDispatch("memory_consolidate", fields, { cwd: memoryDir })
+  const result = await runRcmDispatch("memory_consolidate", fields, { cwd: memoryDir })
 
   return result.reply
 }
@@ -309,7 +305,7 @@ function handleFeishuMessage(data: unknown) {
       const slugChatId = safeSlug(chatId)
       const recentContextPath = ensureRecentContext(slugChatId)
 
-      const { reply } = runAssistant({
+      const result = await runAssistant({
         sessionId,
         reporter,
         message: fullMessage,
@@ -317,14 +313,14 @@ function handleFeishuMessage(data: unknown) {
         chatId,
         messageId,
       })
-      console.log(`[bot] reply: ${reply}`)
+      console.log(`[bot] reply: ${result.reply}`)
 
-      await replyMessage(messageId, reply)
+      await replyMessage(messageId, result.reply)
       console.log(`[bot] reply sent`)
 
       // Layer A: archive after successful reply
-      const action = inferAction(reply)
-      writeArchiveEntry(chatId, messageId, reporter, action, fullMessage, reply)
+      const action = inferAction(result.reply)
+      writeArchiveEntry(chatId, messageId, reporter, action, fullMessage, result.reply)
 
       // Update recent context
       updateRecentContext(slugChatId, {
@@ -332,7 +328,7 @@ function handleFeishuMessage(data: unknown) {
         messageId,
         reporter,
         q: fullMessage,
-        a: reply,
+        a: result.reply,
         action,
       })
 
@@ -346,7 +342,7 @@ function handleFeishuMessage(data: unknown) {
             sessionId,
             reporter,
             message: fullMessage,
-            reply,
+            reply: result.reply,
             action,
             source,
           })
@@ -385,9 +381,9 @@ function startListen() {
 }
 
 // ── Once ──────────────────────────────────────────────────────────
-function runOnce(message: string) {
+async function runOnce(message: string) {
   const sessionId = `manual_${Date.now()}`
-  const { reply } = runAssistant({
+  const { reply } = await runAssistant({
     sessionId,
     reporter: "manual-test",
     message,

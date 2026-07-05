@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process"
+import { execFile } from "node:child_process"
 import { mkdirSync, writeFileSync, readFileSync } from "node:fs"
 import path from "node:path"
 import { rcmDir, cacheDir, botConfig } from "./config"
@@ -74,6 +74,25 @@ function interpolate(template: string, fields: Record<string, string>): string {
   })
 }
 
+/**
+ * Run a subprocess and return stdout.
+ */
+function execAsync(
+  file: string,
+  args: string[],
+  opts: { cwd?: string; timeout?: number; env?: Record<string, string> },
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, { ...opts, encoding: "utf8" }, (err, stdout, stderr) => {
+      if (err) {
+        reject(Object.assign(err, { stdout, stderr }))
+      } else {
+        resolve({ stdout, stderr })
+      }
+    })
+  })
+}
+
 export interface DispatchResult {
   reply: string
   rcmPath: string
@@ -82,13 +101,13 @@ export interface DispatchResult {
 
 /**
  * Dispatch and run an RCM event using our own template engine.
- * Replaces `accelerate dispatch` entirely; only `accelerate run` is needed.
+ * Async — does NOT block the event loop.
  */
-export function runRcmDispatch(
+export async function runRcmDispatch(
   eventName: string,
   values: Record<string, string>,
   opts?: { envExtra?: Record<string, string>; cwd?: string },
-): DispatchResult {
+): Promise<DispatchResult> {
   const route = routes[eventName]
   if (!route) {
     throw new Error(`Unknown RCM event: ${eventName}`)
@@ -116,10 +135,9 @@ export function runRcmDispatch(
   const rcmPath = path.join(cacheDir, rcmFileName)
   writeFileSync(rcmPath, compiled, "utf8")
 
-  // Run accelerator
-  const run = spawnSync(botConfig.rcmBin, ["run", rcmPath, "--speed", "0"], {
+  // Run accelerator (async)
+  const { stdout, stderr } = await execAsync(botConfig.rcmBin, ["run", rcmPath, "--speed", "0"], {
     cwd: opts?.cwd || rcmDir,
-    encoding: "utf8",
     timeout: botConfig.maxRunSeconds * 1000,
     env: {
       ...process.env,
@@ -135,10 +153,8 @@ export function runRcmDispatch(
     JSON.stringify(
       {
         rcmPath,
-        status: run.status,
-        signal: run.signal,
-        stdout: run.stdout,
-        stderr: run.stderr,
+        stdout,
+        stderr,
       },
       null,
       2,
@@ -146,12 +162,7 @@ export function runRcmDispatch(
     "utf8",
   )
 
-  if (run.status !== 0) {
-    const errMsg = (run.stderr || run.stdout || "unknown error").trim().slice(0, 1200)
-    throw new Error(`run failed for ${rcmFileName}; debug log: ${debugPath}; ${errMsg}`)
-  }
-
-  const reply = extractReply(run.stdout, debugPath)
+  const reply = extractReply(stdout, debugPath)
   return { reply, rcmPath, debugPath }
 }
 
