@@ -12,3 +12,4 @@ archive/**
 
 # Mempalace palace data (optional)
 .mempalace/
+.DS_Store

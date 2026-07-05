@@ -26,7 +26,7 @@ import {
   writeImportChunks,
   runMempalaceMine,
 } from "./lib/memory"
-import { runRcmDispatch } from "./lib/rcm"
+import { runRcmDispatch } from "./lib/dispatch"
 
 // ── Ingest queue (single-concurrent) ──────────────────────────────
 let ingestQueue: Promise<void> = Promise.resolve()
@@ -169,12 +169,7 @@ function runAssistant(input: {
     message_id: safeSlug(input.messageId, 64),
   }
 
-  const result = runRcmDispatch({
-    eventName: "assistant",
-    action: "feishu_message",
-    fields,
-    debugPrefix: "assistant",
-  })
+  const result = runRcmDispatch("assistant", fields)
 
   return { reply: result.reply }
 }
@@ -199,13 +194,7 @@ function runMemoryIngest(input: {
         memory_dir: memoryDir,
       }
 
-      runRcmDispatch({
-        eventName: "memory_ingest",
-        action: "feishu_exchange",
-        fields,
-        cwd: memoryDir,
-        debugPrefix: "ingest",
-      })
+      runRcmDispatch("memory_ingest", fields, { cwd: memoryDir })
       resolve()
     } catch (err) {
       console.warn(`[ingest] failed:`, String(err))
@@ -221,13 +210,7 @@ function runMemoryConsolidate(): string {
     target_repo: botConfig.targetRepo,
   }
 
-  const result = runRcmDispatch({
-    eventName: "memory_consolidate",
-    action: "manual",
-    fields,
-    cwd: memoryDir,
-    debugPrefix: "consolidate",
-  })
+  const result = runRcmDispatch("memory_consolidate", fields, { cwd: memoryDir })
 
   return result.reply
 }
