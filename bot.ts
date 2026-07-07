@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
-import * as Lark from "@larksuiteoapi/node-sdk"
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import path from "node:path"
 
+import type { MessageContext } from "./lib/platform"
 import {
   rootDir,
   rcmDir,
@@ -12,6 +12,8 @@ import {
   botConfig,
   MEMORY_INDEX_MAX_LINES,
   RECENT_CONTEXT_MAX_ROUNDS,
+  enabledPlatforms,
+  qqBridgePort,
 } from "./lib/config"
 import {
   safeSlug,
@@ -27,12 +29,13 @@ import {
   runMempalaceMine,
 } from "./lib/memory"
 import { runRcmDispatch } from "./lib/dispatch"
+import type { PlatformAdapter } from "./lib/platform"
 
 // ── Ingest queue (single-concurrent) ──────────────────────────────
 let ingestQueue: Promise<void> = Promise.resolve()
 
 function enqueueIngest(fn: () => Promise<void>): void {
-  ingestQueue = ingestQueue.then(fn, fn) // continue even if previous failed
+  ingestQueue = ingestQueue.then(fn, fn)
 }
 
 // ── Dedup ──────────────────────────────────────────────────────────
@@ -43,91 +46,6 @@ function isDuplicateMessage(messageId: string): boolean {
   recentMessageIds.add(messageId)
   setTimeout(() => recentMessageIds.delete(messageId), 5 * 60_000)
   return false
-}
-
-// ── Feishu types ──────────────────────────────────────────────────
-type FeishuSender = {
-  sender_id?: { open_id?: string; user_id?: string; union_id?: string }
-  sender_type?: string
-}
-
-type FeishuMessage = {
-  message_id?: string
-  chat_id?: string
-  chat_type?: string
-  message_type?: string
-  content?: string
-  create_time?: string
-  root_id?: string
-  parent_id?: string
-  mentions?: Array<{ key: string; name?: string; id?: { open_id?: string }; mentioned_type?: string }>
-}
-
-type FeishuEventPayload = {
-  event?: { sender?: FeishuSender; message?: FeishuMessage }
-  sender?: FeishuSender
-  message?: FeishuMessage
-}
-
-// ── Credentials ───────────────────────────────────────────────────
-function requireFeishuCredentials() {
-  if (!botConfig.appId) throw new Error("Missing required env: FEISHU_APP_ID")
-  if (!botConfig.appSecret) throw new Error("Missing required env: FEISHU_APP_SECRET")
-}
-
-// ── Message parsing ───────────────────────────────────────────────
-function parseMessageContent(content: string | undefined, messageType: string | undefined): string {
-  if (!content) return ""
-  if (messageType === "image") return "[Image]"
-  if (messageType === "file") return "[File]"
-  if (messageType === "audio") return "[Audio]"
-  if (messageType === "video") return "[Video]"
-  if (messageType === "sticker") return "[Sticker]"
-
-  try {
-    const parsed = JSON.parse(content)
-    if (messageType === "text") return parsed.text || ""
-    if (messageType === "post") return parsePostText(parsed)
-  } catch {
-    return content
-  }
-  return content
-}
-
-function parsePostText(parsed: Record<string, unknown>): string {
-  const content = findPostContent(parsed)
-  const lines: string[] = []
-  for (const paragraph of content) {
-    if (!Array.isArray(paragraph)) continue
-    const parts: string[] = []
-    for (const item of paragraph) {
-      if (!item || typeof item !== "object") continue
-      const el = item as { tag?: string; text?: string; href?: string; image_key?: string }
-      if (el.tag === "text" && el.text) parts.push(el.text)
-      if (el.tag === "a" && el.text) parts.push(el.href ? `${el.text}(${el.href})` : el.text)
-      if (el.tag === "img") parts.push("[Image]")
-    }
-    if (parts.length > 0) lines.push(parts.join(""))
-  }
-  return lines.join("\n")
-}
-
-function findPostContent(parsed: Record<string, unknown>): unknown[] {
-  if (Array.isArray(parsed.content)) return parsed.content
-  for (const value of Object.values(parsed)) {
-    if (!value || typeof value !== "object" || Array.isArray(value)) continue
-    const inner = value as Record<string, unknown>
-    if (Array.isArray(inner.content)) return inner.content
-  }
-  return []
-}
-
-function normalizeMentions(text: string, mentions: Array<{ key: string; name?: string }> | undefined): string {
-  let result = text
-  for (const mention of mentions ?? []) {
-    result = result.split(mention.key).join(`@${mention.name || "user"}`)
-  }
-  return result.trim()
 }
 
 // ── Sanitize message for template safety ──────────────────────────
@@ -170,7 +88,6 @@ async function runAssistant(input: {
   }
 
   const result = await runRcmDispatch("assistant", fields)
-
   return { reply: result.reply }
 }
 
@@ -192,7 +109,6 @@ async function runMemoryIngest(input: {
       source: input.source,
       memory_dir: memoryDir,
     }
-
     await runRcmDispatch("memory_ingest", fields, { cwd: memoryDir })
   } catch (err) {
     console.warn(`[ingest] failed:`, String(err))
@@ -205,106 +121,46 @@ async function runMemoryConsolidate(): Promise<string> {
     memory_dir: memoryDir,
     target_repo: botConfig.targetRepo,
   }
-
   const result = await runRcmDispatch("memory_consolidate", fields, { cwd: memoryDir })
-
   return result.reply
 }
 
-// ── Feishu reply ──────────────────────────────────────────────────
-async function replyMessage(messageId: string, text: string) {
-  requireFeishuCredentials()
-  const client = new Lark.Client({ appId: botConfig.appId, appSecret: botConfig.appSecret })
-  await client.im.message.reply({
-    path: { message_id: messageId },
-    data: {
-      msg_type: "text",
-      content: JSON.stringify({ text }),
-    },
-  })
-}
+// ── Core pipeline (platform-agnostic) ─────────────────────────────
 
-async function fetchMessageContent(messageId: string): Promise<string> {
-  try {
-    requireFeishuCredentials()
-    const client = new Lark.Client({ appId: botConfig.appId, appSecret: botConfig.appSecret })
-    const resp = await client.im.message.get({ path: { message_id: messageId } })
-    const item = resp?.data?.items?.[0]
-    if (!item?.msg_type || !item?.body?.content) return ""
-    return parseMessageContent(item.body.content, item.msg_type)
-  } catch (err) {
-    console.warn(`[bot] fetch parent message ${messageId} failed: ${String(err)}`)
-    return ""
-  }
-}
+function createMessageHandler(adapter: PlatformAdapter) {
+  return async (ctx: MessageContext) => {
+    const { message, sender, parentText, platform } = ctx
+    const messageId = message.messageId
+    const chatId = message.chatId
 
-// ── Message handler ───────────────────────────────────────────────
-function handleFeishuMessage(data: unknown) {
-  console.log(`[bot] handleFeishuMessage called`, JSON.stringify(data).slice(0, 500))
-  const payload = data as FeishuEventPayload
-  const sender = payload.sender ?? payload.event?.sender
-  const message = payload.message ?? payload.event?.message
-  console.log(`[bot] sender=`, JSON.stringify(sender).slice(0, 300))
-  console.log(`[bot] message=`, JSON.stringify(message).slice(0, 300))
-
-  if (!message?.message_id || !message.chat_id) {
-    console.log(`[bot] skipped: no message_id or chat_id`)
-    return
-  }
-  if (sender?.sender_type && ["app", "bot", "app_bot"].includes(sender.sender_type.toLowerCase())) {
-    console.log(`[bot] skipped: sender_type=${sender.sender_type}`)
-    return
-  }
-  if (isDuplicateMessage(message.message_id)) {
-    console.log(`[bot] skipped duplicate: ${message.message_id}`)
-    return
-  }
-
-  const msgCreateTime = message.create_time ? parseInt(message.create_time, 10) : 0
-  const now = Date.now()
-  if (msgCreateTime > 0 && (now - msgCreateTime > 10_000 || msgCreateTime > now + 5_000)) {
-    console.log(`[bot] skipped stale/future: ${message.message_id} create_time=${msgCreateTime} now=${now} diff=${now - msgCreateTime}ms`)
-    return
-  }
-
-  if (message.chat_type === "group") {
-    const botMentioned = message.mentions?.some((m) => m.mentioned_type === "bot")
-    if (!botMentioned) {
-      console.log(`[bot] skipped no-bot-mention in group: ${message.message_id}`)
+    // ── Guards ────────────────────────────────────────────────
+    if (isDuplicateMessage(messageId)) {
+      console.log(`[${platform}] skipped duplicate: ${messageId}`)
       return
     }
-  }
 
-  const text = normalizeMentions(parseMessageContent(message.content, message.message_type), message.mentions)
-  if (!text) {
-    console.log(`[bot] skipped: empty text after parse`)
-    return
-  }
+    const now = Date.now()
+    if (message.timestamp > 0 && (now - message.timestamp > 10_000 || message.timestamp > now + 5_000)) {
+      console.log(`[${platform}] skipped stale/future: ${messageId} diff=${now - message.timestamp}ms`)
+      return
+    }
 
-  const senderId = sender?.sender_id?.open_id || sender?.sender_id?.user_id || sender?.sender_id?.union_id || "unknown"
-  const reporter = `Feishu:${senderId}`
-  const chatId = message.chat_id!
-  const messageId = message.message_id!
-  const source = `${message.chat_type || "unknown"}:${chatId}; message:${messageId}`
-  const sessionId = `feishu_${messageId.replace(/[^a-zA-Z0-9_-]/g, "").slice(-24) || Date.now()}`
+    // ── Build context ─────────────────────────────────────────
+    const reporter = sender.userId
+    const source = `${platform}:${chatId}; message:${messageId}`
+    const sessionId = `${platform}_${messageId.replace(/[^a-zA-Z0-9_-]/g, "").slice(-24) || Date.now()}`
+    const slugChatId = safeSlug(chatId)
 
-  console.log(`[bot] received ${messageId}: ${text.slice(0, 120)}`)
+    let fullMessage = message.text
+    if (parentText) {
+      fullMessage = `[回复: ${parentText}]\n${message.text}`
+      console.log(`[${platform}] quoted parent: ${parentText.slice(0, 100)}`)
+    }
 
-  void (async () => {
+    console.log(`[${platform}] received ${messageId}: ${message.text.slice(0, 120)}`)
+
+    // ── Run assistant ─────────────────────────────────────────
     try {
-      let fullMessage = text
-      if (message.parent_id) {
-        const quoted = await fetchMessageContent(message.parent_id)
-        if (quoted) {
-          fullMessage = `[回复: ${quoted}]\n${text}`
-          console.log(`[bot] quoted parent ${message.parent_id}: ${quoted.slice(0, 100)}`)
-        }
-      }
-
-      // Ensure recent context file exists before calling RCM
-      const slugChatId = safeSlug(chatId)
-      const recentContextPath = ensureRecentContext(slugChatId)
-
       const result = await runAssistant({
         sessionId,
         reporter,
@@ -313,12 +169,13 @@ function handleFeishuMessage(data: unknown) {
         chatId,
         messageId,
       })
-      console.log(`[bot] reply: ${result.reply}`)
+      console.log(`[${platform}] reply: ${result.reply}`)
 
-      await replyMessage(messageId, result.reply)
-      console.log(`[bot] reply sent`)
+      // ── Reply ───────────────────────────────────────────
+      await adapter.reply(messageId, result.reply)
+      console.log(`[${platform}] reply sent`)
 
-      // Layer A: archive after successful reply
+      // ── Layer A: archive ─────────────────────────────────
       const action = inferAction(result.reply)
       writeArchiveEntry(chatId, messageId, reporter, action, fullMessage, result.reply)
 
@@ -332,10 +189,10 @@ function handleFeishuMessage(data: unknown) {
         action,
       })
 
-      // Mempalace mine chat archive (fire-and-forget)
+      // Mempalace mine (fire-and-forget)
       runMempalaceMine(chatArchiveDir(slugChatId), slugChatId)
 
-      // Layer B: enqueue ingest (async, single-concurrent)
+      // ── Layer B: ingest ──────────────────────────────────
       enqueueIngest(async () => {
         try {
           await runMemoryIngest({
@@ -346,7 +203,6 @@ function handleFeishuMessage(data: unknown) {
             action,
             source,
           })
-          // Check MEMORY.md line count
           const memIndexPath = path.join(memoryDir, "MEMORY.md")
           if (existsSync(memIndexPath)) {
             const lineCount = readFileSync(memIndexPath, "utf8").split("\n").length
@@ -359,28 +215,50 @@ function handleFeishuMessage(data: unknown) {
         }
       })
     } catch (err) {
-      console.error(`[bot] processing failed:`, err)
-      await replyMessage(messageId, "⚠️ 处理失败，请稍后再试或联系 yzx 查看日志。").catch(() => {})
+      console.error(`[${platform}] processing failed:`, err)
+      await adapter.reply(messageId, "⚠️ 处理失败，请稍后再试或联系 yzx 查看日志。").catch(() => {})
     }
-  })()
+  }
 }
 
-// ── Listen ────────────────────────────────────────────────────────
-function startListen() {
-  requireFeishuCredentials()
+// ── Start platforms ───────────────────────────────────────────────
+function startPlatforms() {
   ensureMemoryLayout()
-  const eventDispatcher = new Lark.EventDispatcher({}).register({
-    "im.message.receive_v1": (data: unknown) => {
-      handleFeishuMessage(data)
-    },
-  })
 
-  const wsClient = new Lark.WSClient({ appId: botConfig.appId, appSecret: botConfig.appSecret })
-  console.log(`[bot] starting Feishu WS for repo ${botConfig.targetRepo}`)
-  void wsClient.start({ eventDispatcher })
+  if (enabledPlatforms.length === 0) {
+    console.error("No platforms enabled. Set PLATFORMS in .env (e.g. PLATFORMS=feishu,qq)")
+    process.exit(1)
+  }
+
+  for (const platform of enabledPlatforms) {
+    console.log(`[boot] loading platform: ${platform}`)
+
+    switch (platform) {
+      case "feishu": {
+        import("./lib/platform-feishu").then((mod) => {
+          const adapter = mod.createFeishuAdapter()
+          const handler = createMessageHandler(adapter)
+          adapter.listen(handler)
+          console.log(`[feishu] adapter started`)
+        })
+        break
+      }
+      case "qq": {
+        import("./lib/platform-qq").then((mod) => {
+          const adapter = mod.createQQAdapter(qqBridgePort)
+          const handler = createMessageHandler(adapter)
+          adapter.listen(handler)
+          console.log(`[qq] bridge listening on :${qqBridgePort}`)
+        })
+        break
+      }
+      default:
+        console.warn(`[boot] unknown platform: ${platform}`)
+    }
+  }
 }
 
-// ── Once ──────────────────────────────────────────────────────────
+// ── Once (manual test) ────────────────────────────────────────────
 async function runOnce(message: string) {
   const sessionId = `manual_${Date.now()}`
   const { reply } = await runAssistant({
@@ -405,17 +283,13 @@ async function runImport(inputArg: string, distill: boolean): Promise<void> {
       process.exit(1)
     }
 
-    // Write archive
-    const { paths, archiveDir: importArchiveDir } = writeImportChunks(sourceSlug, chunks, inputArg, distill)
+    const { archiveDir: importArchiveDir } = writeImportChunks(sourceSlug, chunks, inputArg, distill)
     console.log(`import: ${chunks.length} chunks written to ${importArchiveDir}`)
 
-    // Mempalace mine import dir
     const mempalaceWing = `imports-${sourceSlug}`
     await runMempalaceMine(importArchiveDir, mempalaceWing)
 
-    // Distill
     let remembered = 0
-    let updated = 0
     let skipped = 0
     if (distill) {
       for (let i = 0; i < chunks.length; i++) {
@@ -436,21 +310,16 @@ async function runImport(inputArg: string, distill: boolean): Promise<void> {
             }
             resolve()
           })
-          // Wait for this chunk's ingest to complete before moving to next
         })
       }
-      // Wait for queue to drain
       await ingestQueue
     }
 
-    // Summary
     console.log(`--- Import Summary ---`)
     console.log(`Source: ${inputArg}`)
-    console.log(`Source slug: ${sourceSlug}`)
     console.log(`Chunks: ${chunks.length}`)
     console.log(`Archive: ${importArchiveDir}`)
     console.log(`Distill: ${distill ? `yes (remembered=${remembered}, skipped=${skipped})` : "no"}`)
-    console.log(`Mempalace: ${mempalaceWing}`)
   } catch (err) {
     console.error(`import failed:`, String(err))
     process.exit(1)
@@ -458,21 +327,18 @@ async function runImport(inputArg: string, distill: boolean): Promise<void> {
 }
 
 // ── Consolidate ───────────────────────────────────────────────────
-function runConsolidate(): void {
-  // Check memory/ exists
+async function runConsolidate(): Promise<void> {
   if (!existsSync(memoryDir)) {
     console.error(`consolidate: memory/ directory not found at ${memoryDir}`)
     process.exit(1)
   }
 
-  // Check MEMORY.md exists
   const memIndexPath = path.join(memoryDir, "MEMORY.md")
   if (!existsSync(memIndexPath)) {
     console.error(`consolidate: MEMORY.md not found; run 'bun run bot.ts once "test"' first to initialize`)
     process.exit(1)
   }
 
-  // Check git dirty status (warning only)
   try {
     const status = spawnSync("git", ["status", "--porcelain"], {
       cwd: rootDir,
@@ -483,11 +349,11 @@ function runConsolidate(): void {
       console.warn(`[consolidate] Warning: git working tree is dirty. Consider committing before consolidate.`)
     }
   } catch {
-    // git not available or not a repo; continue
+    // git not available; continue
   }
 
   try {
-    const result = runMemoryConsolidate()
+    const result = await runMemoryConsolidate()
     console.log(result)
   } catch (err) {
     console.error(`consolidate failed:`, String(err))
@@ -499,7 +365,7 @@ function runConsolidate(): void {
 const [command, ...args] = process.argv.slice(2)
 
 if (command === "listen") {
-  startListen()
+  startPlatforms()
 } else if (command === "once") {
   const message = args.join(" ").trim()
   if (!message) throw new Error('Usage: bun run bot.ts once "message"')
@@ -510,7 +376,7 @@ if (command === "listen") {
   if (!inputArg) throw new Error("Usage: bun run bot.ts import <file-or-url> [--distill]")
   void runImport(inputArg, distill)
 } else if (command === "consolidate") {
-  runConsolidate()
+  void runConsolidate()
 } else {
   console.log("Usage:")
   console.log("  bun run bot.ts listen")

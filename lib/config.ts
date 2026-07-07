@@ -20,6 +20,15 @@ export const mempalaceConfig = {
   palacePath: process.env.MEMPALACE_PALACE_PATH?.trim() || "",
 }
 
+// Platform adapters to enable
+export const enabledPlatforms: string[] = (process.env.PLATFORMS || "feishu")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean)
+
+// QQ bridge port
+export const qqBridgePort = parseInt(process.env.QQ_BRIDGE_PORT || "18080", 10)
+
 export const botConfig = {
   appId: process.env.FEISHU_APP_ID?.trim() || "",
   appSecret: process.env.FEISHU_APP_SECRET?.trim() || "",
