@@ -28,7 +28,7 @@ import {
   writeImportChunks,
   runMempalaceMine,
 } from "./lib/memory"
-import { runRcmDispatch } from "./lib/dispatch"
+import { redactSensitiveOutput, runRcmDispatch } from "./lib/dispatch"
 import type { PlatformAdapter } from "./lib/platform"
 
 // ── Ingest queue (single-concurrent) ──────────────────────────────
@@ -154,10 +154,14 @@ function createMessageHandler(adapter: PlatformAdapter) {
     let fullMessage = message.text
     if (parentText) {
       fullMessage = `[回复: ${parentText}]\n${message.text}`
-      console.log(`[${platform}] quoted parent: ${parentText.slice(0, 100)}`)
+      console.log(
+        `[${platform}] quoted parent: ${redactSensitiveOutput(parentText.slice(0, 100), process.env)}`,
+      )
     }
 
-    console.log(`[${platform}] received ${messageId}: ${message.text.slice(0, 120)}`)
+    console.log(
+      `[${platform}] received ${messageId}: ${redactSensitiveOutput(message.text.slice(0, 120), process.env)}`,
+    )
 
     // ── Run assistant ─────────────────────────────────────────
     try {
@@ -169,7 +173,7 @@ function createMessageHandler(adapter: PlatformAdapter) {
         chatId,
         messageId,
       })
-      console.log(`[${platform}] reply: ${result.reply}`)
+      console.log(`[${platform}] reply: ${redactSensitiveOutput(result.reply, process.env)}`)
 
       // ── Reply ───────────────────────────────────────────
       await adapter.reply(messageId, result.reply)

@@ -35,7 +35,8 @@ export const botConfig = {
   rcmBin: process.env.RCM_BIN || DEFAULT_RCM_BIN,
   repoPath: process.env.REPO_PATH || DEFAULT_REPO_PATH,
   targetRepo: process.env.TARGET_REPO || DEFAULT_TARGET_REPO,
-  deepseekApiKey: process.env.DEEPSEEK_API_KEY || "",
+  deepseekApiKey: process.env.DEEPSEEK_API_KEY?.trim() || "",
+  anysearchApiKey: process.env.ANYSEARCH_API_KEY?.trim() || "",
   ghPathPrefix: process.env.GH_PATH_PREFIX || "gh",
   maxRunSeconds: Number(process.env.RCM_RUN_TIMEOUT_SECONDS || "420"),
 }

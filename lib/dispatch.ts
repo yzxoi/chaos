@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process"
-import { mkdirSync, writeFileSync, readFileSync } from "node:fs"
+import { chmodSync, mkdirSync, writeFileSync, readFileSync } from "node:fs"
 import path from "node:path"
 import { rcmDir, cacheDir, botConfig } from "./config"
 
@@ -9,9 +9,16 @@ interface FieldMapping {
   [fieldName: string]: string // tpl var -> value key
 }
 
-const routes: Record<string, { template: string; fields: FieldMapping }> = {
+interface DispatchRoute {
+  template: string
+  fields: FieldMapping
+  requiredEnv?: string[]
+}
+
+const routes: Record<string, DispatchRoute> = {
   assistant: {
     template: "assistant.rcm.tpl",
+    requiredEnv: ["ANYSEARCH_API_KEY"],
     fields: {
       SESSION_ID: "session_id",
       REPORTER: "reporter",
@@ -74,23 +81,95 @@ function interpolate(template: string, fields: Record<string, string>): string {
   })
 }
 
+const inheritedEnvironmentKeys = [
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TMPDIR",
+  "LANG",
+  "LC_ALL",
+  "TERM",
+  "XDG_CONFIG_HOME",
+  "GITHUB_TOKEN",
+  "GH_TOKEN",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "SSH_AUTH_SOCK",
+] as const
+
+function inheritedRcmEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    inheritedEnvironmentKeys.flatMap(name =>
+      source[name] === undefined ? [] : [[name, source[name]]],
+    ),
+  )
+}
+
+export function redactSensitiveOutput(output: string, env: NodeJS.ProcessEnv): string {
+  let redacted = output
+  const sensitiveValues = Object.entries(env)
+    .filter(([name, value]) => value && /(?:KEY|TOKEN|SECRET|PASSWORD|AUTH)/i.test(name))
+    .map(([, value]) => value as string)
+    .filter(value => value.length >= 8)
+    .sort((a, b) => b.length - a.length)
+
+  for (const value of sensitiveValues) {
+    redacted = redacted.split(value).join("[REDACTED]")
+  }
+
+  return redacted
+    .replace(/Bearer\s+[^\s"']+/gi, "Bearer [REDACTED]")
+    .replace(/\b(?:as_sk_|sk-|ghp_|github_pat_)[A-Za-z0-9_-]+\b/g, "[REDACTED]")
+}
+
 /**
  * Run a subprocess and return stdout.
  */
 function execAsync(
   file: string,
   args: string[],
-  opts: { cwd?: string; timeout?: number; env?: Record<string, string> },
+  opts: { cwd?: string; timeout?: number; env?: NodeJS.ProcessEnv },
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     execFile(file, args, { ...opts, encoding: "utf8" }, (err, stdout, stderr) => {
+      const safeStdout = redactSensitiveOutput(stdout, opts.env ?? {})
+      const safeStderr = redactSensitiveOutput(stderr, opts.env ?? {})
       if (err) {
-        reject(Object.assign(err, { stdout, stderr }))
+        err.message = redactSensitiveOutput(err.message, opts.env ?? {})
+        reject(Object.assign(err, { stdout: safeStdout, stderr: safeStderr }))
       } else {
-        resolve({ stdout, stderr })
+        resolve({ stdout: safeStdout, stderr: safeStderr })
       }
     })
   })
+}
+
+export function buildRcmEnvironment(
+  envExtra?: NodeJS.ProcessEnv,
+  parentEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  return {
+    ...inheritedRcmEnvironment(parentEnv),
+    DEEPSEEK_API_KEY: botConfig.deepseekApiKey,
+    ANYSEARCH_API_KEY: botConfig.anysearchApiKey,
+    PATH: `${botConfig.ghPathPrefix}:${parentEnv.PATH || ""}`,
+    ...envExtra,
+  }
+}
+
+export function validateDispatchEnvironment(eventName: string, env: NodeJS.ProcessEnv): void {
+  const route = routes[eventName]
+  if (!route) {
+    throw new Error(`Unknown RCM event: ${eventName}`)
+  }
+
+  for (const name of route.requiredEnv ?? []) {
+    if (!env[name]?.trim()) {
+      throw new Error(`Missing required env: ${name}`)
+    }
+  }
 }
 
 export interface DispatchResult {
@@ -106,12 +185,15 @@ export interface DispatchResult {
 export async function runRcmDispatch(
   eventName: string,
   values: Record<string, string>,
-  opts?: { envExtra?: Record<string, string>; cwd?: string },
+  opts?: { envExtra?: NodeJS.ProcessEnv; cwd?: string },
 ): Promise<DispatchResult> {
   const route = routes[eventName]
   if (!route) {
     throw new Error(`Unknown RCM event: ${eventName}`)
   }
+
+  const subprocessEnv = buildRcmEnvironment(opts?.envExtra)
+  validateDispatchEnvironment(eventName, subprocessEnv)
 
   // Build the field map from input values
   const fields: Record<string, string> = {}
@@ -126,25 +208,22 @@ export async function runRcmDispatch(
 
   // Write compiled .rcm to cache
   mkdirSync(cacheDir, { recursive: true })
+  chmodSync(cacheDir, 0o700)
   const timestamp = new Date()
     .toISOString()
     .replace(/[-:]/g, "")
     .replace(/\..+/, "")
-    .replace("T", "T")
   const rcmFileName = `${timestamp}-${route.template.replace(".tpl", "")}`
   const rcmPath = path.join(cacheDir, rcmFileName)
-  writeFileSync(rcmPath, compiled, "utf8")
+  writeFileSync(rcmPath, compiled, { encoding: "utf8", mode: 0o600 })
 
+  // `mode` only applies when creating a file; also tighten a same-second cache collision.
+  chmodSync(rcmPath, 0o600)
   // Run accelerator (async)
   const { stdout, stderr } = await execAsync(botConfig.rcmBin, ["run", rcmPath, "--speed", "0"], {
     cwd: opts?.cwd || rcmDir,
     timeout: botConfig.maxRunSeconds * 1000,
-    env: {
-      ...process.env,
-      DEEPSEEK_API_KEY: botConfig.deepseekApiKey,
-      PATH: `${botConfig.ghPathPrefix}:${process.env.PATH || ""}`,
-      ...opts?.envExtra,
-    },
+    env: subprocessEnv,
   })
 
   const debugPath = path.join(cacheDir, `${rcmFileName}.run.log`)
@@ -159,9 +238,11 @@ export async function runRcmDispatch(
       null,
       2,
     ),
-    "utf8",
+    { encoding: "utf8", mode: 0o600 },
   )
 
+  // `mode` only applies when creating a file; also tighten a same-second cache collision.
+  chmodSync(debugPath, 0o600)
   const reply = extractReply(stdout, debugPath)
   return { reply, rcmPath, debugPath }
 }

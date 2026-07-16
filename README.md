@@ -36,6 +36,7 @@ bun run bot.ts listen
 | `FEISHU_APP_SECRET` | ✓ | 飞书应用 App Secret |
 | `FEISHU_BOT_OPEN_ID` | | 可选兜底；启动时会自动解析当前机器人 open_id，API 解析失败时可手动配置 |
 | `DEEPSEEK_API_KEY` | ✓ | DeepSeek API Key |
+| `ANYSEARCH_API_KEY` | ✓ | AnySearch MCP API Key，不含 `Bearer` 前缀；仅通过进程环境传给 RCM，不写入编译缓存 |
 | `GITHUB_TOKEN` | ✓ | GitHub Personal Access Token（`repo` scope） |
 | `TARGET_REPO` | | 目标 GitHub 仓库，默认 `SII-Holos/synergy` |
 | `REPO_PATH` | | 本地仓库路径，默认 `./synergy` |
@@ -75,6 +76,18 @@ bun run bot.ts listen
 | `bun run bot.ts once "msg"` | 单次测试 |
 | `bun run bot.ts import <file>` | 导入文档到知识库 |
 | `bun run bot.ts consolidate` | 整理记忆条目 |
+
+## AnySearch MCP
+
+RCM assistant 通过 Streamable HTTP 连接 `https://api.anysearch.com/mcp`，并暴露 `anysearch__search`、`anysearch__batch_search`、`anysearch__extract` 和 `anysearch__get_sub_domains`。只有需要当前外部信息或本地证据不足时才搜索；专业垂直检索会先发现可用 sub-domain。
+
+`.env` 中配置原始 API Key：
+
+```bash
+ANYSEARCH_API_KEY=as_sk_xxx
+```
+
+模板缓存只保存 `${ANYSEARCH_API_KEY}` 占位符；RCM 编译时从子进程环境解析并用于 Authorization header。
 
 ## 平台配置
 
