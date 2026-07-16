@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 import uuid
 
 import urllib.request
 import urllib.error
+import urllib.parse
 
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star
@@ -26,7 +28,7 @@ from astrbot.api.message_components import Plain, Reply
 
 CHAOS_URL = "http://127.0.0.1:18080"
 POLL_INTERVAL = 2  # seconds
-POLL_TIMEOUT = 60  # seconds
+POLL_TIMEOUT = max(1, int(os.getenv("CHAOS_POLL_TIMEOUT_SECONDS", "480")))
 
 
 # ── Plugin ─────────────────────────────────────────────────────────
@@ -35,7 +37,7 @@ POLL_TIMEOUT = 60  # seconds
 class ChaosQQBridgePlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
-        logger.info("Chaos QQ bridge plugin loaded")
+        logger.info("Chaos QQ bridge plugin loaded (poll timeout: %ss)", POLL_TIMEOUT)
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
@@ -132,9 +134,8 @@ class ChaosQQBridgePlugin(Star):
         while time.time() - t0 < POLL_TIMEOUT:
             await asyncio.sleep(POLL_INTERVAL)
             try:
-                replies = await loop.run_in_executor(None, _poll_replies)
-                if message_id in replies:
-                    reply_text = replies[message_id]
+                reply_text = await loop.run_in_executor(None, _poll_reply, message_id)
+                if reply_text is not None:
                     break
             except Exception as e:
                 logger.warning("Poll replies error: %s", e)
@@ -166,9 +167,14 @@ def _post_message(payload: dict) -> None:
         resp.read()  # drain
 
 
-def _poll_replies() -> dict:
-    """GET pending replies from Chaos and return the JSON map."""
-    req = urllib.request.Request(f"{CHAOS_URL}/qq/pending-replies", method="GET")
+def _poll_reply(message_id: str) -> str | None:
+    """Claim only this message's pending reply without consuming others."""
+    query = urllib.parse.urlencode({"message_id": message_id})
+    req = urllib.request.Request(
+        f"{CHAOS_URL}/qq/pending-replies?{query}", method="GET"
+    )
     with urllib.request.urlopen(req, timeout=10) as resp:
         body = resp.read().decode("utf-8")
-        return json.loads(body)
+        replies = json.loads(body)
+        value = replies.get(message_id)
+        return value if isinstance(value, str) else None

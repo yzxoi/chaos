@@ -34,12 +34,14 @@ bun run bot.ts listen
 |------|:--:|------|
 | `FEISHU_APP_ID` | ✓ | 飞书应用 App ID |
 | `FEISHU_APP_SECRET` | ✓ | 飞书应用 App Secret |
+| `FEISHU_BOT_OPEN_ID` | | 可选兜底；启动时会自动解析当前机器人 open_id，API 解析失败时可手动配置 |
 | `DEEPSEEK_API_KEY` | ✓ | DeepSeek API Key |
 | `GITHUB_TOKEN` | ✓ | GitHub Personal Access Token（`repo` scope） |
 | `TARGET_REPO` | | 目标 GitHub 仓库，默认 `SII-Holos/synergy` |
 | `REPO_PATH` | | 本地仓库路径，默认 `./synergy` |
 | `PLATFORMS` | | 启用的平台，逗号分隔，默认 `feishu`（可选 `qq`） |
 | `QQ_BRIDGE_PORT` | | QQ 桥接端口，默认 `18080` |
+| `CHAOS_POLL_TIMEOUT_SECONDS` | | AstrBot 插件轮询回复超时，默认 `480` 秒；需配置在 AstrBot 进程环境中 |
 
 ## 架构
 
@@ -50,7 +52,7 @@ bun run bot.ts listen
 └──────┬───────────────────────┬───────────────────┘
        │                       │
   platform-feishu.ts     platform-qq.ts
-   Lark WebSocket         HTTP :18080
+   Lark WebSocket       HTTP 127.0.0.1:18080
        │                       │
        │               astrbot-plugin-chaos
     飞书群                    │
@@ -83,6 +85,7 @@ bun run bot.ts listen
 | 订阅方式 | **使用长连接接收事件** |
 | 订阅事件 | `im.message.receive_v1` |
 | 权限 | `im:message`、`im:message:send_as_bot` |
+| 群聊唤醒 | 启动时解析当前机器人 open_id，仅处理 @ 当前机器人的消息；其他机器人、同名机器人和 @all 均忽略 |
 
 启用方式：`.env` 中 `PLATFORMS=feishu`
 
@@ -90,8 +93,9 @@ bun run bot.ts listen
 
 1. 在 `.env` 中设置 `PLATFORMS=feishu,qq`
 2. 将 `astrbot-plugin-chaos/` 复制到 AstrBot 的 plugins 目录
-3. 重启 Chaos 和 AstrBot
-4. 群聊中 @bot 即可触发
+3. 可在 AstrBot 进程环境中设置 `CHAOS_POLL_TIMEOUT_SECONDS`，默认 `480` 秒
+4. 重启 Chaos 和 AstrBot
+5. 群聊中 @bot 即可触发；插件按 `message_id` 独立领取回复，避免并发消息互相消费
 
 ## License
 

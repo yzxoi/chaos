@@ -32,7 +32,6 @@ export function createQQAdapter(port: number = 18080): PlatformAdapter {
   const server = createServer()
 
   server.on("request", (req: IncomingMessage, res: ServerResponse) => {
-    setCORSHeaders(res)
 
     if (req.method === "OPTIONS") {
       res.writeHead(204)
@@ -46,8 +45,10 @@ export function createQQAdapter(port: number = 18080): PlatformAdapter {
     switch (pathname) {
       case "/qq/health":
         return handleHealth(res)
-      case "/qq/pending-replies":
-        return handlePendingReplies(req, res)
+      case "/qq/pending-replies": {
+        const messageId = typeof parsedUrl.query.message_id === "string" ? parsedUrl.query.message_id : undefined
+        return handlePendingReplies(req, res, messageId)
+      }
       case "/qq/message":
         return handleIncomingMessage(req, res)
       default:
@@ -61,7 +62,7 @@ export function createQQAdapter(port: number = 18080): PlatformAdapter {
     writeJSON(res, 200, { status: "ok" })
   }
 
-  function handlePendingReplies(req: IncomingMessage, res: ServerResponse): void {
+  function handlePendingReplies(req: IncomingMessage, res: ServerResponse, messageId?: string): void {
     if (req.method !== "GET") {
       writeJSON(res, 405, { error: "method not allowed" })
       return
@@ -69,13 +70,17 @@ export function createQQAdapter(port: number = 18080): PlatformAdapter {
 
     expireStaleReplies()
 
-    const snapshot: Record<string, string> = {}
-    for (const [key, reply] of pendingReplies) {
-      snapshot[key] = reply.text
+    if (messageId) {
+      const reply = pendingReplies.get(messageId)
+      if (!reply) {
+        writeJSON(res, 200, {})
+        return
+      }
+      pendingReplies.delete(messageId)
+      writeJSON(res, 200, { [messageId]: reply.text })
+      return
     }
-    pendingReplies.clear()
-
-    writeJSON(res, 200, snapshot)
+    writeJSON(res, 400, { error: "message_id is required" })
   }
 
   function handleIncomingMessage(req: IncomingMessage, res: ServerResponse): void {
@@ -106,8 +111,8 @@ export function createQQAdapter(port: number = 18080): PlatformAdapter {
       let payload: QQMessagePayload
       try {
         payload = JSON.parse(body)
-      } catch (err) {
-        writeJSON(res, 400, { error: `invalid JSON: ${String(err)}` })
+      } catch {
+        writeJSON(res, 400, { error: "invalid JSON body" })
         return
       }
 
@@ -172,8 +177,8 @@ export function createQQAdapter(port: number = 18080): PlatformAdapter {
 
     listen(handler: MessageHandler): void {
       messageHandler = handler
-      server.listen(port, () => {
-        console.log(`[qq] HTTP adapter listening on port ${port}`)
+      server.listen(port, "127.0.0.1", () => {
+        console.log(`[qq] HTTP adapter listening on 127.0.0.1:${port}`)
       })
     },
 
@@ -198,11 +203,6 @@ export function createQQAdapter(port: number = 18080): PlatformAdapter {
 
 // ── Module-level helpers ──────────────────────────────────────────
 
-function setCORSHeaders(res: ServerResponse): void {
-  res.setHeader("Access-Control-Allow-Origin", "*")
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type")
-}
 
 function writeJSON(res: ServerResponse, status: number, data: unknown): void {
   res.writeHead(status, { "Content-Type": "application/json" })

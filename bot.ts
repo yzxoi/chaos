@@ -235,21 +235,31 @@ function startPlatforms() {
 
     switch (platform) {
       case "feishu": {
-        import("./lib/platform-feishu").then((mod) => {
-          const adapter = mod.createFeishuAdapter()
-          const handler = createMessageHandler(adapter)
-          adapter.listen(handler)
-          console.log(`[feishu] adapter started`)
-        })
+        import("./lib/platform-feishu")
+          .then(async (mod) => {
+            const adapter = await mod.createFeishuAdapter()
+            const handler = createMessageHandler(adapter)
+            adapter.listen(handler)
+            console.log(`[feishu] adapter started`)
+          })
+          .catch((err) => {
+            console.error(`[feishu] adapter failed to start: ${String(err)}`)
+            process.exit(1)
+          })
         break
       }
       case "qq": {
-        import("./lib/platform-qq").then((mod) => {
-          const adapter = mod.createQQAdapter(qqBridgePort)
-          const handler = createMessageHandler(adapter)
-          adapter.listen(handler)
-          console.log(`[qq] bridge listening on :${qqBridgePort}`)
-        })
+        import("./lib/platform-qq")
+          .then((mod) => {
+            const adapter = mod.createQQAdapter(qqBridgePort)
+            const handler = createMessageHandler(adapter)
+            adapter.listen(handler)
+            console.log(`[qq] bridge listening on 127.0.0.1:${qqBridgePort}`)
+          })
+          .catch((err) => {
+            console.error(`[qq] adapter failed to start: ${String(err)}`)
+            process.exit(1)
+          })
         break
       }
       default:

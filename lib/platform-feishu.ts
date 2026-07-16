@@ -1,4 +1,5 @@
 import * as Lark from "@larksuiteoapi/node-sdk"
+import { isSelfMentioned, type FeishuBotIdentity, type FeishuMention } from "./feishu-mention"
 import type { PlatformAdapter, MessageHandler, MessageContext, ParsedMessage, SenderInfo } from "./platform"
 
 // ── Feishu types (private) ──────────────────────────────────────────
@@ -16,13 +17,18 @@ type FeishuMessage = {
   create_time?: string
   root_id?: string
   parent_id?: string
-  mentions?: Array<{ key: string; name?: string; id?: { open_id?: string }; mentioned_type?: string }>
+  mentions?: FeishuMention[]
 }
 
 type FeishuEventPayload = {
   event?: { sender?: FeishuSender; message?: FeishuMessage }
   sender?: FeishuSender
   message?: FeishuMessage
+}
+
+type FeishuBotInfoResponse = {
+  code?: unknown
+  bot?: unknown
 }
 
 // ── Message parsing (private) ───────────────────────────────────────
@@ -81,7 +87,7 @@ function normalizeMentions(text: string, mentions: Array<{ key: string; name?: s
 }
 
 // ── Adapter factory ────────────────────────────────────────────────
-export function createFeishuAdapter(): PlatformAdapter {
+export async function createFeishuAdapter(): Promise<PlatformAdapter> {
   const appId = process.env.FEISHU_APP_ID?.trim() || ""
   const appSecret = process.env.FEISHU_APP_SECRET?.trim() || ""
 
@@ -90,6 +96,10 @@ export function createFeishuAdapter(): PlatformAdapter {
   }
 
   const client = new Lark.Client({ appId, appSecret })
+  const configuredBotIdentity: FeishuBotIdentity = {
+    openId: process.env.FEISHU_BOT_OPEN_ID?.trim() || undefined,
+  }
+  const resolvedBotIdentity = await resolveBotIdentity(client, configuredBotIdentity)
 
   const adapter: PlatformAdapter = {
     name: "feishu",
@@ -149,9 +159,9 @@ export function createFeishuAdapter(): PlatformAdapter {
     }
 
     if (message.chat_type === "group") {
-      const botMentioned = message.mentions?.some((m) => m.mentioned_type === "bot")
+      const botMentioned = isSelfMentioned(message.mentions, resolvedBotIdentity)
       if (!botMentioned) {
-        console.log(`[feishu] skipped no-bot-mention in group: ${message.message_id}`)
+        console.log(`[feishu] skipped no-self-mention in group: ${message.message_id}`)
         return
       }
     }
@@ -197,4 +207,68 @@ export function createFeishuAdapter(): PlatformAdapter {
       }
     })()
   }
+}
+
+export async function resolveBotIdentity(
+  client: Pick<Lark.Client, "request">,
+  configuredIdentity: FeishuBotIdentity,
+): Promise<FeishuBotIdentity> {
+  let discoveredIdentity: FeishuBotIdentity | undefined
+
+  try {
+    const resp = await client.request<FeishuBotInfoResponse>({
+      method: "GET",
+      url: "open-apis/bot/v3/info",
+      timeout: 10_000,
+    })
+    discoveredIdentity = parseBotIdentityResponse(resp)
+  } catch (err) {
+    if (!hasStableBotIdentity(configuredIdentity)) {
+      throw new Error(
+        "Failed to resolve Feishu bot identity; configure FEISHU_BOT_OPEN_ID as a fallback",
+        { cause: err },
+      )
+    }
+    console.warn("[feishu] bot identity API lookup failed; using configured stable identity")
+    return { ...configuredIdentity }
+  }
+
+  if (configuredIdentity.openId && configuredIdentity.openId !== discoveredIdentity.openId) {
+    throw new Error("Configured FEISHU_BOT_OPEN_ID does not match the authenticated Feishu app")
+  }
+
+  const identity: FeishuBotIdentity = {
+    ...configuredIdentity,
+    openId: discoveredIdentity.openId,
+    name: discoveredIdentity.name,
+  }
+  console.log(`[feishu] bot identity resolved${identity.name ? `: ${identity.name}` : ""}`)
+  return identity
+}
+
+function parseBotIdentityResponse(resp: FeishuBotInfoResponse): FeishuBotIdentity {
+  if (typeof resp.code !== "number") {
+    throw new Error("Feishu bot identity API returned an invalid response")
+  }
+  if (resp.code !== 0) {
+    throw new Error(`Feishu bot identity API returned code=${resp.code}`)
+  }
+  if (!resp.bot || typeof resp.bot !== "object") {
+    throw new Error("Feishu bot identity API response is missing bot data")
+  }
+
+  const bot = resp.bot as Record<string, unknown>
+  const openId = typeof bot.open_id === "string" ? bot.open_id.trim() : ""
+  if (!openId) {
+    throw new Error("Feishu bot identity API response is missing bot open_id")
+  }
+
+  return {
+    openId,
+    name: typeof bot.app_name === "string" ? bot.app_name.trim() || undefined : undefined,
+  }
+}
+
+function hasStableBotIdentity(identity: FeishuBotIdentity): boolean {
+  return Boolean(identity.openId)
 }
